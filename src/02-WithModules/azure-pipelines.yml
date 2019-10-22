@@ -1,0 +1,61 @@
+trigger:
+- master
+
+pool:
+  vmImage: 'ubuntu-latest'
+variables:
+ - group: TerraformVariables
+ - group: KeyVault
+
+steps:
+
+- task: DownloadSecureFile@1
+  name : "tfvars"
+  inputs:
+    secureFile: 'terraform-modules.auto.tfvars'
+- task: DownloadSecureFile@1
+  name : terraformcredentials
+  inputs:
+    secureFile: '.terraformrc'
+
+- task: Bash@3
+  inputs:
+    targetType: 'inline'
+    script: |
+      
+      terraform version
+      
+       ls
+        echo $TF_ARM_CLIENT_ID
+
+        echo $TF_ARM_CLIENT_SECRE
+         
+         echo $TF_CLI_CONFIG_FILE
+      
+         echo $(pfx)
+
+         mv $(tfvars.secureFilePath)   $(Build.SourcesDirectory)/terraform-modules.auto.tfvars
+
+         chmod 775 terraform-modules.auto.tfvars
+         
+         terraform init
+         
+         terraform plan -input=false -out $(Build.ArtifactStagingDirectory)/plan.tfplan > $(Build.ArtifactStagingDirectory)/plan.json
+  env:
+    TF_ARM_CLIENT_ID: $(ARM_CLIENT_ID)
+    TF_ARM_CLIENT_SECRET: $(ARM_CLIENT_SECRET)
+    TF_ARM_TENANT_ID: $(ARM_TENANT_ID)
+    TF_ARM_SUBSCRIPTION_ID: $(ARM_SUBSCRIPTION_ID)
+    TF_CLI_CONFIG_FILE: $(terraformcredentials.secureFilePath)
+
+- task: PublishBuildArtifacts@1
+  inputs:
+    PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+    ArtifactName: 'drop'
+    publishLocation: 'Container'
+
+- task: PublishBuildArtifacts@1
+  inputs:
+    PathtoPublish: '$(Build.SourcesDirectory)'
+    ArtifactName: 'drop'
+    publishLocation: 'Container'

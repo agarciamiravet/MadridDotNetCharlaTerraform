@@ -1,0 +1,269 @@
+trigger:
+  tags:
+      include:
+       - version-*
+stages:
+- stage: Build
+  jobs:
+  - job: Build
+    pool:
+      vmImage: 'ubuntu-latest'
+    variables:
+     - group: TerraformVariables
+     - group: KeyVault
+
+    continueOnError: true
+    steps:
+    - task: DownloadSecureFile@1
+      name : "database_staging_tfvars"
+      inputs:
+       secureFile: 'terraform-database-staging.auto.tfvars'
+
+    - task: DownloadSecureFile@1
+      name : "webapp_staging_tfvars"
+      inputs:
+       secureFile: 'terraform-webapp-staging.auto.tfvars'
+
+    - task: DownloadSecureFile@1
+      name : terraformcredentials
+      inputs:
+       secureFile: '.terraformrc'
+    - task: Bash@3
+      inputs:
+        targetType: 'inline'
+        script: |
+
+          cd staging
+          
+          cd PreData
+
+          terraform init
+
+          terraform apply --auto-approve
+          
+          cd ..
+          
+          cd ..
+
+      env:
+       TF_ARM_CLIENT_ID: $(ARM_CLIENT_ID)
+       TF_ARM_CLIENT_SECRET: $(ARM_CLIENT_SECRET)
+       TF_ARM_TENANT_ID: $(ARM_TENANT_ID)
+       TF_ARM_SUBSCRIPTION_ID: $(ARM_SUBSCRIPTION_ID)
+       TF_CLI_CONFIG_FILE: $(terraformcredentials.secureFilePath)
+
+    - task: Bash@3
+      inputs:
+       targetType: 'inline'
+       script: |
+      
+        mv $(database_staging_tfvars.secureFilePath)   $(Build.SourcesDirectory)/staging/Database/terraform.tfvars
+
+        mv $(webapp_staging_tfvars.secureFilePath)   $(Build.SourcesDirectory)/staging/WebApp/terraform.tfvars
+
+        echo "***************Resource group - Staging***********"
+      
+        cd staging
+
+        cd ResourceGroup
+
+        ls
+
+        terraform init
+         
+        terraform plan -input=false -out $(Build.SourcesDirectory)/staging/ResourceGroup/resourcegroup-staging-plan.tfplan >$(Build.SourcesDirectory)/staging/ResourceGroup/resourcegroup-staging-plan.json
+
+
+        echo "**************Database - Staging*****************"
+
+        cd ..
+
+        cd Database
+
+        terraform init 
+
+        chmod 775 terraform.tfvars
+
+        terraform plan -input=false -out $(Build.SourcesDirectory)/staging/Database/database-staging-plan.tfplan > $(Build.SourcesDirectory)/staging/Database/database-staging-plan.json
+        
+        echo "***********Web App - Staging********************"
+
+        cd ..
+
+        cd WebApp
+
+        ls
+
+        terraform init
+
+        chmod 775 terraform.tfvars
+
+        terraform plan -input=false -out $(Build.SourcesDirectory)/staging/WebApp/webapp-staging-plan.tfplan > $(Build.SourcesDirectory)/staging/WebApp/webapp-staging-plan.json
+        
+      env:
+       TF_ARM_CLIENT_ID: $(ARM_CLIENT_ID)
+       TF_ARM_CLIENT_SECRET: $(ARM_CLIENT_SECRET)
+       TF_ARM_TENANT_ID: $(ARM_TENANT_ID)
+       TF_ARM_SUBSCRIPTION_ID: $(ARM_SUBSCRIPTION_ID)
+       TF_CLI_CONFIG_FILE: $(terraformcredentials.secureFilePath)
+       DNSIMPLE_ACCOUNT: $(DNSIMPLE_ACCOUNT)
+       DNSIMPLE_TOKEN: $(DNSIMPLE_TOKEN)
+    
+    - task: PublishPipelineArtifact@1
+      inputs:
+       artifact: 'drop' 
+       targetPath: '$(Build.SourcesDirectory)'
+
+- stage: deploy
+  displayName: "Staging deploy infrastructure"
+  variables: 
+     - group: TerraformVariables
+     - group: KeyVault
+  jobs:
+  - deployment: DeployInfrastructure
+    pool:
+      vmImage: 'ubuntu-latest'
+    environment: 'staging'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - download: none
+          - task: DownloadSecureFile@1
+            name : terraformcredentials
+            inputs:
+              secureFile: '.terraformrc'
+          - task: DownloadPipelineArtifact@2
+            inputs:
+              buildType: 'current'
+              artifactName: 'drop'
+              targetPath: '$(Pipeline.Workspace)'
+          - task: Bash@3
+            inputs:
+              targetType: 'inline'
+              script: |
+                
+                  echo "************Deploy resource group**********"
+
+                  cd $(Pipeline.Workspace)/staging/ResourceGroup
+
+                  chmod -R 755 .terraform
+
+                  terraform init
+
+                  terraform apply resourcegroup-staging-plan.tfplan
+
+
+                  echo "************Deploy database**********"
+
+                  cd $(Pipeline.Workspace)/staging/Database
+
+                  chmod -R 755 .terraform
+
+                  terraform init
+
+                  terraform apply database-staging-plan.tfplan
+
+
+                  echo "************Deploy webapp**********"
+                  cd $(Pipeline.Workspace)/staging/WebApp
+
+                  chmod -R 755 .terraform
+
+                  terraform init
+
+                  terraform apply webapp-staging-plan.tfplan
+            env:
+             TF_ARM_CLIENT_ID: $(ARM_CLIENT_ID)
+             TF_ARM_CLIENT_SECRET: $(ARM_CLIENT_SECRET)
+             TF_ARM_TENANT_ID: $(ARM_TENANT_ID)
+             TF_ARM_SUBSCRIPTION_ID: $(ARM_SUBSCRIPTION_ID)
+             TF_CLI_CONFIG_FILE: $(terraformcredentials.secureFilePath)
+             DNSIMPLE_ACCOUNT: $(DNSIMPLE_ACCOUNT)
+             DNSIMPLE_TOKEN: $(DNSIMPLE_TOKEN)
+- stage: deployApp
+  displayName: "Staging deploy web"
+  variables: 
+     - group: TerraformVariables
+     - group: KeyVault
+  jobs:
+  - deployment: DeployWebApp
+    pool:
+      vmImage: 'ubuntu-latest'
+    environment: 'staging'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - download: none
+          - task: PowerShell@2
+            inputs:
+              targetType: 'inline'
+              script: |
+
+                $token = "$(azuredevops_pat)"
+                $uriLatestBuild = "https://dev.azure.com/recetasdevops/TerraformSimpleMadridDotNet/_apis/build/latest/13?api-version=5.1-preview.1"
+                $queryLatestBuild = Invoke-RestMethod -Uri $uriLatestBuild -Headers @{Authorization=("Basic {0}" -f $token)} -Method Get
+
+                $buildId = $queryLatestBuild.id
+
+                $uri = "https://dev.azure.com/recetasdevops/TerraformSimpleMadridDotNet/_apis/build/builds/" + $buildId + "/artifacts?artifactName=drop&api-version=5.1"
+                $query = Invoke-RestMethod -Uri $uri -Headers @{Authorization=("Basic {0}" -f $token)} -Method Get
+                Write-host $query.resource.downloadUrl
+                $downloadUrl = $query.resource.downloadUrl
+
+                Invoke-WebRequest -Uri $downloadUrl -Headers @{Authorization=("Basic {0}" -f $token)} -Method Get -OutFile "$(Pipeline.Workspace)/pipeline.zip"
+
+                cd $(Pipeline.Workspace)
+                
+                ls
+
+                expand-archive -path 'pipeline.zip' -destinationpath '.\'
+
+                ls
+          - task: AzureCLI@2
+            displayName: 'RotateKeys'
+            inputs:
+              azureSubscription: 'Visual Studio Enterprise (ca00e31b-ed34-48f8-9b4e-10847c74d493)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: ' az sql server update --admin-password $(SQLNEWPASS) --name pplbitsstagingdbserver --resource-group madriddotnet-rg-staging'
+            env:
+             SQLNEWPASS: $(SqlNewPass)
+          - task: AzureWebApp@1
+            inputs:
+              azureSubscription: 'Visual Studio Enterprise (ca00e31b-ed34-48f8-9b4e-10847c74d493)'
+              appType: 'webApp'
+              appName: 'pplbits-staging'
+              package: '$(Pipeline.Workspace)/drop/pasionporlosbits.zip'
+              deploymentMethod: 'auto'
+
+- stage: InSpecVerificationTests
+  displayName: "InSpec Verification Tests"
+  variables: 
+      - group: TerraformVariables
+      - group: KeyVault
+  jobs:
+    - deployment: InSpecVerificationTests
+      pool:
+       name: Inspec
+      environment: 'staging'
+      strategy:
+        runOnce:
+         deploy:
+          steps:
+          - task: DownloadPipelineArtifact@2
+            inputs:
+              buildType: 'current'
+              artifactName: 'drop'
+              targetPath: '$(Pipeline.Workspace)'
+          - task: Bash@3
+            displayName: "Run inspec tests"
+            inputs:
+              targetType: inline
+              script: |
+                ls
+                cd $(Pipeline.Workspace)
+                cd VerificationTests
+                sudo inspec version
+                sudo inspec exec . -t azure:// --chef-license=accept
